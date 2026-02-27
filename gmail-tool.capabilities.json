@@ -3,8 +3,14 @@
       "allowlist": [
         {
           "host": "gmail.googleapis.com",
-          "path_prefix": "/gmail/v1/",
-          "methods": ["GET", "POST", "DELETE"]
+          "path_prefix": "/gmail/v1/users/me/messages",
+          "methods": ["GET"]
+        },
+        {
+          "host": "gmail.googleapis.com",
+          "path_prefix": "/gmail/v1/users/me/messages/",
+          "path_suffix": "/modify",
+          "methods": ["POST"]
         }
       ],
       "credentials": {
@@ -32,8 +38,7 @@
         "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
         "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
         "scopes": [
-          "https://www.googleapis.com/auth/gmail.modify",
-          "https://www.googleapis.com/auth/gmail.compose"
+          "https://www.googleapis.com/auth/gmail.modify"
         ],
         "use_pkce": false,
         "extra_params": {

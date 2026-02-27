@@ -27,58 +27,51 @@ pub enum GmailAction {
         message_id: String,
     },
 
-    /// Send an email.
-    SendMessage {
-        /// Recipient email address(es), comma-separated.
-        to: String,
-        /// Email subject.
-        subject: String,
-        /// Email body (plain text).
-        body: String,
-        /// CC recipients, comma-separated.
-        #[serde(default)]
-        cc: Option<String>,
-        /// BCC recipients, comma-separated.
-        #[serde(default)]
-        bcc: Option<String>,
-    },
-
-    /// Create a draft email.
-    CreateDraft {
-        /// Recipient email address(es), comma-separated.
-        to: String,
-        /// Email subject.
-        subject: String,
-        /// Email body (plain text).
-        body: String,
-        /// CC recipients, comma-separated.
-        #[serde(default)]
-        cc: Option<String>,
-        /// BCC recipients, comma-separated.
-        #[serde(default)]
-        bcc: Option<String>,
-    },
-
-    /// Reply to an existing message.
-    ReplyToMessage {
-        /// The message ID to reply to.
+    /// Modify a message's labels (add/remove labels, mark as read/unread, etc.).
+    ModifyMessage {
+        /// The message ID.
         message_id: String,
-        /// Reply body (plain text).
-        body: String,
-        /// If true, reply to all recipients. Default: false.
+        /// Label IDs to add (e.g., "STARRED", "IMPORTANT").
         #[serde(default)]
-        reply_all: bool,
-    },
-
-    /// Move a message to trash.
-    TrashMessage {
-        /// The message ID to trash.
-        message_id: String,
+        add_label_ids: Vec<String>,
+        /// Label IDs to remove (e.g., "UNREAD", "INBOX").
+        #[serde(default)]
+        remove_label_ids: Vec<String>,
     },
 }
 
 fn default_max_results() -> u32 {
     20
+}
+
+/// Permission level for this tool instance, injected via request context by the host.
+///
+/// # Permission Levels
+///
+/// - `read_only`: Can only list and read messages (list_messages, get_message).
+/// - `read_and_mark`: Read + mark as read/unread (modify UNREAD label only).
+/// - `read_and_labels`: Read + full label management (modify any allowed label).
+///
+/// Defaults to `read_only` if not provided in context.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionLevel {
+    ReadOnly,
+    ReadAndMark,
+    ReadAndLabels,
+}
+
+impl Default for PermissionLevel {
+    fn default() -> Self {
+        PermissionLevel::ReadOnly
+    }
+}
+
+/// Context injected by the host when launching this tool instance.
+#[derive(Debug, Deserialize, Default)]
+pub struct ToolContext {
+    #[serde(default)]
+    pub permission: PermissionLevel,
 }
 
 /// A Gmail message summary (from list endpoint).
@@ -112,6 +105,13 @@ pub struct Message {
     pub is_unread: bool,
 }
 
+/// Result from modify_message.
+#[derive(Debug, Serialize)]
+pub struct ModifyResult {
+    pub id: String,
+    pub label_ids: Vec<String>,
+}
+
 /// Result from list_messages.
 #[derive(Debug, Serialize)]
 pub struct ListMessagesResult {
@@ -121,24 +121,3 @@ pub struct ListMessagesResult {
     pub next_page_token: Option<String>,
 }
 
-/// Result from send_message or reply_to_message.
-#[derive(Debug, Serialize)]
-pub struct SendResult {
-    pub id: String,
-    pub thread_id: String,
-    pub label_ids: Vec<String>,
-}
-
-/// Result from create_draft.
-#[derive(Debug, Serialize)]
-pub struct DraftResult {
-    pub id: String,
-    pub message_id: String,
-}
-
-/// Result from trash_message.
-#[derive(Debug, Serialize)]
-pub struct TrashResult {
-    pub id: String,
-    pub trashed: bool,
-}

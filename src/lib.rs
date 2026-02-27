@@ -1,32 +1,34 @@
 //! Gmail WASM Tool for IronClaw.
 //!
-//! Provides Gmail integration for reading, searching, sending, drafting,
-//! and replying to emails.
+//! Provides Gmail integration for reading, searching, and managing email labels.
 //!
 //! # Capabilities Required
 //!
-//! - HTTP: `gmail.googleapis.com/gmail/v1/*` (GET, POST, DELETE)
+//! - HTTP: `gmail.googleapis.com/gmail/v1/*` (GET, POST)
 //! - Secrets: `google_oauth_token` (shared OAuth 2.0 token, injected automatically)
 //!
 //! # Supported Actions
 //!
 //! - `list_messages`: List/search messages with Gmail query syntax
 //! - `get_message`: Get a specific message with full content
-//! - `send_message`: Send a new email
-//! - `create_draft`: Create a draft email
-//! - `reply_to_message`: Reply to an existing message (or reply-all)
-//! - `trash_message`: Move a message to trash
+//! - `modify_message`: Modify labels (mark read/unread, add/remove labels)
 //!
-//! # Example Usage
+//! # Permission Levels (via request context)
+//!
+//! The host injects a permission level per instance via `request.context`:
+//!
+//! - `read_only` (default): Only list_messages and get_message allowed.
+//! - `read_and_mark`: Read + mark as read/unread (UNREAD label only).
+//! - `read_and_labels`: Read + full label management.
 //!
 //! ```json
-//! {"action": "list_messages", "query": "is:unread from:boss@company.com", "max_results": 5}
+//! {"permission": "read_and_mark"}
 //! ```
 
 mod api;
 mod types;
 
-use types::GmailAction;
+use types::{GmailAction, PermissionLevel, ToolContext};
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
@@ -37,7 +39,7 @@ struct GmailTool;
 
 impl exports::near::agent::tool::Guest for GmailTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
-        match execute_inner(&req.params) {
+        match execute_inner(&req.params, req.context.as_deref()) {
             Ok(result) => exports::near::agent::tool::Response {
                 output: Some(result),
                 error: None,
@@ -56,7 +58,7 @@ impl exports::near::agent::tool::Guest for GmailTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list_messages", "get_message", "send_message", "create_draft", "reply_to_message", "trash_message"],
+                    "enum": ["list_messages", "get_message", "modify_message"],
                     "description": "The Gmail operation to perform"
                 },
                 "query": {
@@ -75,32 +77,17 @@ impl exports::near::agent::tool::Guest for GmailTool {
                 },
                 "message_id": {
                     "type": "string",
-                    "description": "Message ID. Required for: get_message, reply_to_message, trash_message"
+                    "description": "Message ID. Required for: get_message, modify_message"
                 },
-                "to": {
-                    "type": "string",
-                    "description": "Recipient email address(es), comma-separated. Required for: send_message, create_draft"
+                "add_label_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Label IDs to add (e.g., 'STARRED', 'IMPORTANT'). Used by: modify_message"
                 },
-                "subject": {
-                    "type": "string",
-                    "description": "Email subject. Required for: send_message, create_draft"
-                },
-                "body": {
-                    "type": "string",
-                    "description": "Email body (plain text). Required for: send_message, create_draft, reply_to_message"
-                },
-                "cc": {
-                    "type": "string",
-                    "description": "CC recipients, comma-separated. Used by: send_message, create_draft"
-                },
-                "bcc": {
-                    "type": "string",
-                    "description": "BCC recipients, comma-separated. Used by: send_message, create_draft"
-                },
-                "reply_all": {
-                    "type": "boolean",
-                    "description": "If true, reply to all recipients (default: false). Used by: reply_to_message",
-                    "default": false
+                "remove_label_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Label IDs to remove (e.g., 'UNREAD', 'INBOX'). Used by: modify_message"
                 }
             }
         }"#
@@ -108,14 +95,15 @@ impl exports::near::agent::tool::Guest for GmailTool {
     }
 
     fn description() -> String {
-        "Gmail integration for reading, searching, sending, drafting, and replying to emails. \
+        "Gmail integration for reading, searching, and managing email labels. \
          Supports Gmail search query syntax (is:unread, from:, subject:, after:, etc.). \
-         Requires a Google OAuth token with gmail.modify and gmail.compose scopes."
+         Can mark messages as read/unread and add/remove labels. \
+         Requires a Google OAuth token with gmail.modify scope."
             .to_string()
     }
 }
 
-fn execute_inner(params: &str) -> Result<String, String> {
+fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
     if !crate::near::agent::host::secret_exists("google_oauth_token") {
         return Err(
             "Google OAuth token not configured. Run `ironclaw tool auth gmail` to set up \
@@ -124,12 +112,17 @@ fn execute_inner(params: &str) -> Result<String, String> {
         );
     }
 
+    // Parse permission from host-injected context. Defaults to read_only.
+    let ctx: ToolContext = context
+        .map(|c| serde_json::from_str(c).unwrap_or_default())
+        .unwrap_or_default();
+
     let action: GmailAction =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {}", e))?;
 
     crate::near::agent::host::log(
         crate::near::agent::host::LogLevel::Info,
-        &format!("Executing Gmail action: {:?}", action),
+        &format!("Executing Gmail action: {:?} (permission: {:?})", action, ctx.permission),
     );
 
     let result = match action {
@@ -147,44 +140,45 @@ fn execute_inner(params: &str) -> Result<String, String> {
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        GmailAction::SendMessage {
-            to,
-            subject,
-            body,
-            cc,
-            bcc,
-        } => {
-            let result = api::send_message(&to, &subject, &body, cc.as_deref(), bcc.as_deref())?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
-        }
-
-        GmailAction::CreateDraft {
-            to,
-            subject,
-            body,
-            cc,
-            bcc,
-        } => {
-            let result = api::create_draft(&to, &subject, &body, cc.as_deref(), bcc.as_deref())?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
-        }
-
-        GmailAction::ReplyToMessage {
+        GmailAction::ModifyMessage {
             message_id,
-            body,
-            reply_all,
+            add_label_ids,
+            remove_label_ids,
         } => {
-            let result = api::reply_to_message(&message_id, &body, reply_all)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
-        }
-
-        GmailAction::TrashMessage { message_id } => {
-            let result = api::trash_message(&message_id)?;
+            check_modify_permission(&ctx.permission, &add_label_ids, &remove_label_ids)?;
+            let result =
+                api::modify_message(&message_id, &add_label_ids, &remove_label_ids)?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
     };
 
     Ok(result)
+}
+
+/// Check if the current permission level allows the requested label modification.
+fn check_modify_permission(
+    permission: &PermissionLevel,
+    add_label_ids: &[String],
+    remove_label_ids: &[String],
+) -> Result<(), String> {
+    match permission {
+        PermissionLevel::ReadOnly => {
+            Err("This account is configured as read-only. Label modification is not allowed.".to_string())
+        }
+        PermissionLevel::ReadAndMark => {
+            // Only allow adding/removing "UNREAD" label
+            for label in add_label_ids.iter().chain(remove_label_ids.iter()) {
+                if label != "UNREAD" {
+                    return Err(format!(
+                        "This account only allows mark-as-read/unread. Cannot modify label '{}'.",
+                        label
+                    ));
+                }
+            }
+            Ok(())
+        }
+        PermissionLevel::ReadAndLabels => Ok(()),
+    }
 }
 
 export!(GmailTool);
